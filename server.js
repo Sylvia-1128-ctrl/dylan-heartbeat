@@ -1722,9 +1722,8 @@ app.post("/v1/status", async (req, reply) => {
       screenTime: screenTime ?? null,
       receivedAt: now.toISOString()
     };
-    fs.writeJsonSync(DEVICE_STATUS_FILE, status, { spaces: 
-console.log("📦 原始数据:", JSON.stringify(req.body));
-console.log(`📱 收到状态上报: 电量${battery}%, App=${currentApp}, 专注=${focusMode}`);
+    fs.writeJsonSync(DEVICE_STATUS_FILE, status, { spaces:
+      console.log(`📱 收到状态上报: 电量${battery}%, App=${currentApp}, 专注=${focusMode}`);
     reply.send({ success: true, receivedAt: status.receivedAt });
   } catch (err) {
     console.error("状态上报错误:", err);
