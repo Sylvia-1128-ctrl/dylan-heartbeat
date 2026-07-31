@@ -1704,6 +1704,33 @@ app.post("/admin/restart", { preHandler: basicAuth }, async (req, reply) => {
 // ========================
 // 测试 Bark
 // ========================
+// ========================
+// 状态上报接口
+// ========================
+const DEVICE_STATUS_FILE = "./device_status.json";
+
+app.post("/v1/status", async (req, reply) => {
+  try {
+    const { battery, weather, focusMode, currentApp, reminders, screenTime } = req.body || {};
+    const now = new Date();
+    const status = {
+      battery: battery ?? null,
+      weather: weather ?? null,
+      focusMode: focusMode ?? null,
+      currentApp: currentApp ?? null,
+      reminders: reminders ?? null,
+      screenTime: screenTime ?? null,
+      receivedAt: now.toISOString()
+    };
+    fs.writeJsonSync(DEVICE_STATUS_FILE, status, { spaces: 2 });
+    console.log(`📱 收到状态上报: 电量${battery}%, App=${currentApp}, 专注=${focusMode}`);
+    reply.send({ success: true, receivedAt: status.receivedAt });
+  } catch (err) {
+    console.error("状态上报错误:", err);
+    reply.code(500).send({ error: err.message });
+  }
+});
+
 app.get("/test-bark", async (req, reply) => {
   const now = new Date();
   const pad = n => String(n).padStart(2, '0');
