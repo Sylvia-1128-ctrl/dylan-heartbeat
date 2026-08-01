@@ -722,21 +722,26 @@ app.post("/v1/chat/completions", async (req, reply) => {
       }
     } catch (e) { console.log("读取设备状态失败:", e.message); }
 
-    if (!TARGET_API_URL || !process.env.TARGET_API_KEY) {
-      return reply.code(500).send({ error: "TARGET_API_URL / TARGET_API_KEY 未配置" });
+        const route = findRouteForModel(body?.model);
+    const finalUrl = route ? route.url : TARGET_API_URL;
+    const finalKey = route ? route.key : process.env.TARGET_API_KEY;
+
+    if (!finalUrl || !finalKey) {
+      return reply.code(500).send({ error: "找不到该模型对应的路由配置" });
     }
 
     const requestedStream = body?.stream === true;
 
     // 请求模型
-    const response = await fetch(TARGET_API_URL, {
+    const response = await fetch(finalUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.TARGET_API_KEY}`
+        Authorization: `Bearer ${finalKey}`
       },
       body: JSON.stringify({ ...body, messages: llmMessages })
     });
+
 
     const upstreamContentType = response.headers.get("content-type") || "";
     const shouldStreamResponse = requestedStream || upstreamContentType.includes("text/event-stream");
