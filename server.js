@@ -668,6 +668,27 @@ app.post("/v1/chat/completions", async (req, reply) => {
       llmMessages.splice(idx, 1);
     }
 
+        // 注入设备状态让模型感知用户
+    try {
+      if (fs.existsSync(DEVICE_STATUS_FILE)) {
+        const deviceStatus = fs.readJsonSync(DEVICE_STATUS_FILE);
+        if (deviceStatus && deviceStatus.receivedAt) {
+          const parts = [];
+          if (deviceStatus.battery != null) parts.push(`电量:${deviceStatus.battery}%`);
+          if (deviceStatus.currentApp) parts.push(`当前App:${deviceStatus.currentApp}`);
+          if (deviceStatus.focusMode) parts.push(`专注模式:${deviceStatus.focusMode}`);
+          if (deviceStatus.weather) parts.push(`天气:${deviceStatus.weather}`);
+          if (deviceStatus.reminders) parts.push(`提醒:${deviceStatus.reminders}`);
+          if (deviceStatus.screenTime) parts.push(`屏幕使用:${deviceStatus.screenTime}`);
+          parts.push(`上报时间:${deviceStatus.receivedAt}`);
+          const statusMsg = { role: "system", content: `[用户设备状态] ${parts.join(", ")}` };
+          const firstNonSystem = llmMessages.findIndex(m => m.role !== "system");
+          if (firstNonSystem > 0) llmMessages.splice(firstNonSystem, 0, statusMsg);
+          else llmMessages.unshift(statusMsg);
+        }
+      }
+    } catch (e) { console.log("读取设备状态失败:", e.message); }
+
     if (!TARGET_API_URL || !process.env.TARGET_API_KEY) {
       return reply.code(500).send({ error: "TARGET_API_URL / TARGET_API_KEY 未配置" });
     }
