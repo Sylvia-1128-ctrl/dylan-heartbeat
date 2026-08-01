@@ -556,11 +556,10 @@ app.addHook("onRequest", (req, reply, done) => {
 // Models
 // ========================
 app.get("/v1/models", async (req, reply) => {
-  reply.send({
-    object: "list",
-    data: [{ id: configuredModelName(), object: "model", created: 0, owned_by: "gateway" }]
-  });
+  const models = getAllModelNames().map(id => ({ id, object: "model", created: 0, owned_by: "gateway" }));
+  reply.send({ object: "list", data: models });
 });
+
 
 // ========================
 // Chat Completions
