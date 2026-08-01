@@ -42,6 +42,40 @@ function configuredModelName() {
 // ========================
 // 多模态消息处理
 // ========================
+// ========================
+// 模型路由（多中转站支持）
+// ========================
+function parseModelRoutes() {
+  const raw = process.env.MODEL_ROUTES || "";
+  if (!raw.trim()) return [];
+  const routes = [];
+  const groups = raw.split(";");
+  for (const group of groups) {
+    const parts = group.split("|");
+    if (parts.length < 3) continue;
+    const models = parts[0].split(",").map(m => m.trim()).filter(Boolean);
+    const url = parts[1].trim();
+    const key = parts[2].trim();
+    for (const model of models) {
+      routes.push({ model, url, key });
+    }
+  }
+  return routes;
+}
+
+function findRouteForModel(modelName) {
+  const routes = parseModelRoutes();
+  if (!routes.length) return null;
+  const found = routes.find(r => r.model === modelName);
+  return found || null;
+}
+
+function getAllModelNames() {
+  const routes = parseModelRoutes();
+  if (!routes.length) return [configuredModelName()];
+  return routes.map(r => r.model);
+}
+
 function shouldForwardMultimodalContent() {
   // 批注 2026-07-15：默认把 Kelivo 的图片 content 数组原样交给视觉模型；
   // 如果上游不是多模态模型，部署者仍可显式设 MULTIMODAL_MODE=text 退回旧的 [图片] 占位模式。
