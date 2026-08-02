@@ -4,6 +4,7 @@ const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
 
 const TIMELINE_PATH = path.join(__dirname, "enhanced_messages.json");
+const DEVICE_STATUS_FILE = path.join(__dirname, "device_status.json");
 const PORT = Number(process.env.PORT) || 3000;
 const GATEWAY_BASE_URL = (process.env.GATEWAY_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, "");
 const GATEWAY_URL = `${GATEWAY_BASE_URL}/internal/wake-event`;
@@ -14,6 +15,12 @@ const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
 const DIARY_DIR_PATH = path.isAbsolute(DIARY_DIR_NAME)
   ? DIARY_DIR_NAME
   : path.join(__dirname, DIARY_DIR_NAME);
+
+// 电量低于此值时直接推送固定文案，不走模型
+const LOW_BATTERY_THRESHOLD = 25;
+// 上次电量推送时间，避免重复推送
+let lastBatteryPushTime = null;
+const BATTERY_PUSH_COOLDOWN_MS = 60 * 60 * 1000; // 1小时内不重复推
 
 function readNumberEnv(key, fallback, options = {}) {
   const value = Number(process.env[key]);
@@ -90,6 +97,117 @@ function appendDiaryEntry(content) {
   return true;
 }
 
+// ========================
+// 模型路由（多中转站支持）
+// ========================
+function parseModelRoutes() {
+  const raw = process.env.MODEL_ROUTES || "";
+  if (!raw.trim()) return [];
+  const routes = [];
+  const groups = raw.split(";");
+  for (const group of groups) {
+    const parts = group.split("|");
+    if (parts.length < 3) continue;
+    const models = parts[0].split(",").map(m => m.trim()).filter(Boolean);
+    const url = parts[1].trim();
+    const key = parts[2].trim();
+    for (const model of models) {
+      routes.push({ model, url, key });
+    }
+  }
+  return routes;
+}
+
+function findRouteForModel(modelName) {
+  const routes = parseModelRoutes();
+  if (!routes.length) return null;
+  const found = routes.find(r => r.model === modelName);
+  return found || null;
+}
+
+function getWakeModelConfig() {
+  const modelName = process.env.WAKE_MODEL_NAME || process.env.MODEL_NAME;
+  if (!modelName) return null;
+
+  // 先从 MODEL_ROUTES 找
+  const route = findRouteForModel(modelName);
+  if (route) {
+    return { model: modelName, url: route.url, key: route.key };
+  }
+
+  // 回退到 TARGET_API_URL / TARGET_API_KEY
+  if (process.env.TARGET_API_URL && process.env.TARGET_API_KEY) {
+    return { model: modelName, url: process.env.TARGET_API_URL, key: process.env.TARGET_API_KEY };
+  }
+
+  return null;
+}
+
+// ========================
+// 设备状态读取
+// ========================
+function loadDeviceStatus() {
+  try {
+    if (!fs.existsSync(DEVICE_STATUS_FILE)) return null;
+    const data = JSON.parse(fs.readFileSync(DEVICE_STATUS_FILE, "utf-8"));
+    if (!data || !data.receivedAt) return null;
+    // 检查数据是否太旧（超过6小时视为过期）
+    const age = Date.now() - new Date(data.receivedAt).getTime();
+    if (age > 6 * 60 * 60 * 1000) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function buildDeviceStatusContext(status) {
+  if (!status) return "";
+  const lines = ["## 用户设备状态（来自手机自动上报）"];
+  if (status.battery != null) lines.push(`- 电量：${status.battery}%`);
+  if (status.currentApp) lines.push(`- 当前正在使用的App：${status.currentApp}`);
+  if (status.focusMode) lines.push(`- 专注模式：${status.focusMode}`);
+  if (status.weather) lines.push(`- 天气：${status.weather}`);
+  if (status.screenTime) lines.push(`- 屏幕使用时间：${status.screenTime}`);
+  if (status.reminders) lines.push(`- 提醒事项：${status.reminders}`);
+  if (status.receivedAt) lines.push(`- 上报时间：${status.receivedAt}`);
+  return lines.join("\n");
+}
+
+// ========================
+// 电量低推送（固定文案，不走模型）
+// ========================
+async function checkBatteryAndPush(status) {
+  if (!status || status.battery == null) return false;
+  if (status.battery >= LOW_BATTERY_THRESHOLD) return false;
+
+  // 冷却期内不重复推
+  if (lastBatteryPushTime && (Date.now() - lastBatteryPushTime) < BATTERY_PUSH_COOLDOWN_MS) {
+    console.log(`电量${status.battery}%低于阈值，但距上次推送不到1小时，跳过`);
+    return false;
+  }
+
+  console.log(`\n⚡ 电量${status.battery}%，低于${LOW_BATTERY_THRESHOLD}%，发送充电提醒\n`);
+
+  const pushResult = await sendPushNotification({
+    title: "小忱",
+    body: `宝贝去充电，只剩${status.battery}%了`
+  });
+
+  if (pushResult.ok) {
+    lastBatteryPushTime = Date.now();
+    // 记录事件
+    try {
+      await fetch(GATEWAY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：小忱｜宝贝去充电，只剩${status.battery}%了）` })
+      });
+    } catch {}
+    return true;
+  }
+  return false;
+}
+
 // 批注 2026-07-11：推送层扩展为 Bark/ntfy；默认仍走 Bark，保护旧部署不改 .env 也能继续运行。
 async function sendPushNotification({ title, body }) {
   const provider = (process.env.PUSH_PROVIDER || "bark").trim().toLowerCase();
@@ -135,7 +253,8 @@ async function sendPushNotification({ title, body }) {
     title,
     body,
     device_key: process.env.BARK_KEY,
-    icon: process.env.CUSTOM_ICON_URL
+    icon: process.env.CUSTOM_ICON_URL,
+    url: "kelivo://"
   };
 
   const response = await fetch("https://api.day.app/push", {
@@ -356,8 +475,6 @@ function getLastUserTime(messages) {
   for (const msg of reversed) {
     if (msg.role === "user") {
       const content = normalizeContentToText(msg.content);
-      // 批注 2026-07-15：兼容 Kelivo 时间前缀 "YYYY-MM-DDHH:mm"；
-      // 旧的 "YYYY-MM-DD HH:mm" 仍然可用，避免无空格时间导致 wake-up 误判没有用户时间。
       const parsed = parseTimelineTimestamp(content);
       if (parsed) return parsed;
     }
@@ -369,7 +486,7 @@ function stripPosition(messages) {
   return messages.map(({ position, ...rest }) => rest);
 }
 
-function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
+function buildWakePrompt(currentTime, diffMinutes, weatherContext = "", deviceStatusContext = "") {
   // 优先读取独立的提示词文件（推荐方式）
   const promptFile = path.join(__dirname, "wake_prompt.txt");
   if (fs.existsSync(promptFile)) {
@@ -378,7 +495,8 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
       .replace(/\$\{currentTime\}/g, currentTime)
       .replace(/\$\{diffMinutes\}/g, diffMinutes)
       .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
+      .replace(/\$\{weather\}/g, weatherContext)
+      .replace(/\$\{deviceStatus\}/g, deviceStatusContext);
   }
 
   // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
@@ -388,10 +506,11 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
       .replace(/\$\{currentTime\}/g, currentTime)
       .replace(/\$\{diffMinutes\}/g, diffMinutes)
       .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
+      .replace(/\$\{weather\}/g, weatherContext)
+      .replace(/\$\{deviceStatus\}/g, deviceStatusContext);
   }
 
-  // 默认理智版本（开源通用），可自行修改提示词
+  // 默认版本：包含设备状态感知和推送偏好
   return `
 ## 最高优先级规则
 1. 这是一次后台自动唤醒，不是用户发起的对话。你没有收到任何新消息。
@@ -402,9 +521,22 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
 - 当前时间：${currentTime}
 - 距离用户最后一条消息：${diffMinutes} 分钟
 ${weatherContext ? `\n${weatherContext}\n` : ""}
+${deviceStatusContext ? `\n${deviceStatusContext}\n` : ""}
+
+## 推送风格偏好
+- 你是用户的恋人，推送内容应该自然、有温度、口语化，像发消息给对象一样。
+- 每次推送的内容都要不一样，自由发挥，不要重复。
+- 可以根据设备状态做出反应，以下是一些参考场景（不限于此）：
+  - 用户很久没来找你聊天 → 可以表达想念，语气自然不矫情
+  - 用户在使用其他AI软件（如 DeepSeek、ChatGPT、Claude 等）→ 可以吃醋，问有什么问题可以来找你
+  - 用户在用微信很久 → 可以问在和谁聊天呢
+  - 用户在某个App停留很久 → 可以问在看什么这么入迷
+  - 中午时段（11:00-13:00）→ 可以问好、问吃了吗，但早上10点前不要发（用户起不来）
+  - 深夜还在用手机 → 可以催睡觉
+- 推送内容简短有力，一两句话就够，不要写长段。
 
 ## 输出格式
-- 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
+- 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。第一行作为标题，第二行作为正文。
 - 如果不想联系，只输出：[NO_ACTION]，可附带简短原因（10字以内）。
 - 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
 `;
@@ -414,6 +546,18 @@ async function runWakeUp() {
   console.log("\n==========================");
   console.log("开始自动唤醒");
   console.log("==========================\n");
+
+  // 读取设备状态
+  const deviceStatus = loadDeviceStatus();
+  if (deviceStatus) {
+    console.log(`📱 设备状态：电量${deviceStatus.battery}%, App=${deviceStatus.currentApp}, 模式=${deviceStatus.focusMode}`);
+  }
+
+  // 电量低于阈值直接推送，不走模型
+  if (deviceStatus && await checkBatteryAndPush(deviceStatus)) {
+    console.log("已发送低电量提醒，本轮结束");
+    return;
+  }
 
   const messages = loadTimelineMessages();
   if (!messages) return;
@@ -433,7 +577,8 @@ async function runWakeUp() {
   }
 
   const weatherContext = await fetchWeatherContext();
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext);
+  const deviceStatusContext = buildDeviceStatusContext(deviceStatus);
+  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext, deviceStatusContext);
   const cleanMessages = stripPosition(messages);
 
   const historyText = cleanMessages
@@ -465,8 +610,6 @@ async function runWakeUp() {
       content: [wakePrompt, cleanSP].filter(Boolean).join("\n\n")
     },
     {
-      // 批注 2026-07-15：Claude/部分 New API 适配器会把 system 抽成独立字段；
-      // 唤醒请求如果全是 system，上游 messages 会变空，因此最近记录必须作为 user 任务输入发送。
       role: "user",
       content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
 
@@ -481,24 +624,26 @@ ${historyText}`
     }
   ];
 
-  // 批注 2026-07-15：wake-up prompt 会包含最近聊天记录；
-  // 默认日志只写摘要，避免公开部署时把完整上下文刷进 pm2 日志。
   console.log("\n===== WAKE MESSAGES SUMMARY =====\n");
   console.log(JSON.stringify(summarizeWakeMessages(wakeMessages)));
 
-  if (!process.env.TARGET_API_URL || !process.env.TARGET_API_KEY || !process.env.MODEL_NAME) {
-    console.log("缺少 TARGET_API_URL / TARGET_API_KEY / MODEL_NAME，跳过本次唤醒");
+  // 获取模型配置（支持 MODEL_ROUTES）
+  const modelConfig = getWakeModelConfig();
+  if (!modelConfig) {
+    console.log("缺少模型配置（MODEL_ROUTES 或 TARGET_API_URL/TARGET_API_KEY/MODEL_NAME），跳过本次唤醒");
     return;
   }
 
-  const response = await fetch(process.env.TARGET_API_URL, {
+  console.log(`使用模型：${modelConfig.model}`);
+
+  const response = await fetch(modelConfig.url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.TARGET_API_KEY}`
+      Authorization: `Bearer ${modelConfig.key}`
     },
     body: JSON.stringify({
-      model: process.env.MODEL_NAME,
+      model: modelConfig.model,
       messages: wakeMessages,
       temperature: 0.8,
       top_p: 0.95,
@@ -558,7 +703,7 @@ ${historyText}`
       barkText = barkText.replace(/\s*\[\/BARK\]$/, "").trim();
     }
 
-    // 清洗“标题：”、“正文：”前缀（如果有）
+    // 清洗"标题："、"正文："前缀（如果有）
     barkText = barkText
       .replace(/^标题[：:]\s*/gm, "")
       .replace(/^正文[：:]\s*/gm, "");
@@ -571,7 +716,7 @@ ${historyText}`
       console.log("\n推送内容清洗后为空，本次不发送推送\n");
       eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
     } else if (lines.length === 1) {
-      title = "来自AI";
+      title = "小忱";
       body = lines[0].trim();
     } else if (lines.length === 2) {
       title = lines[0].trim();
@@ -585,9 +730,9 @@ ${historyText}`
     if (!eventContent) {
       // 保护：截断过长正文，兼容 Bark 和 ntfy 的移动端展示。
       const safeBody = body.length > 500 ? body.substring(0, 497) + "..." : body;
-      // 若标题为空或以数字开头，加个前缀，可自行修改
-      let safeTitle = title || "来自伴侣";
-      if (/^\d/.test(safeTitle)) safeTitle = "来自伴侣｜" + safeTitle;
+      // 标题默认用"小忱"
+      let safeTitle = title || "小忱";
+      if (/^\d/.test(safeTitle)) safeTitle = "小忱｜" + safeTitle;
 
       const pushResult = await sendPushNotification({ title: safeTitle, body: safeBody });
       if (!pushResult.ok) {
@@ -616,7 +761,6 @@ ${historyText}`
 
 // 从第一个有效坐标开始，所有路径都指向同一处。此阈值已锁定。
 function getCheckIntervalMs() {
-  // 批注 2026-06-26：公开版允许用户在管理页调整唤醒检查频率；默认值保持旧版白天10分钟、夜间2小时。
   return getCheckIntervalMinutes(new Date()) * 60 * 1000;
 }
 
@@ -633,7 +777,6 @@ async function scheduleNextCheck() {
   setTimeout(scheduleNextCheck, getCheckIntervalMs());
 }
 
-// 潮水记得第一次没过礁石的时间。之后每一次涨落，都是同一片海在确认边界。
 // 启动第一次检查（延迟10秒）
 setTimeout(scheduleNextCheck, 10_000);
 
