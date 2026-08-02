@@ -12,9 +12,7 @@ const HEARTBEAT_URL = `${GATEWAY_BASE_URL}/internal/heartbeat`;
 const TIME_ZONE = process.env.TIME_ZONE || "Europe/London";
 const WEATHER_TIMEOUT_MS = 5000;
 const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
-const DIARY_DIR_PATH = path.isAbsolute(DIARY_DIR_NAME)
-  ? DIARY_DIR_NAME
-  : path.join(__dirname, DIARY_DIR_NAME);
+const DIARY_DIR_PATH = path.isAbsolute(DIARY_DIR_NAME) ? DIARY_DIR_NAME : path.join(__dirname, DIARY_DIR_NAME);
 
 // 电量低于此值时直接推送固定文案，不走模型
 const LOW_BATTERY_THRESHOLD = 25;
@@ -144,6 +142,46 @@ function getWakeModelConfig() {
 }
 
 // ========================
+// 候选模型列表（支持故障转移）
+// ========================
+function getWakeModelCandidates() {
+  const candidates = [];
+  const primaryName = process.env.WAKE_MODEL_NAME || process.env.MODEL_NAME;
+  const routes = parseModelRoutes();
+  const seen = new Set();
+
+  function pushCandidate(model, url, key) {
+    if (!model || !url || !key) return;
+    const id = `${model}::${url}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    candidates.push({ model, url, key });
+  }
+
+  // 1. 主力模型（WAKE_MODEL_NAME 或 MODEL_NAME）对应的路由
+  if (primaryName) {
+    const route = findRouteForModel(primaryName);
+    if (route) {
+      pushCandidate(primaryName, route.url, route.key);
+    } else if (process.env.TARGET_API_URL && process.env.TARGET_API_KEY) {
+      pushCandidate(primaryName, process.env.TARGET_API_URL, process.env.TARGET_API_KEY);
+    }
+  }
+
+  // 2. MODEL_ROUTES 里的其他模型（作为备胎，按配置顺序）
+  for (const route of routes) {
+    pushCandidate(route.model, route.url, route.key);
+  }
+
+  // 3. 兜底 TARGET_API_URL / TARGET_API_KEY
+  if (!candidates.length && process.env.TARGET_API_URL && process.env.TARGET_API_KEY) {
+    pushCandidate(primaryName || "gateway-model", process.env.TARGET_API_URL, process.env.TARGET_API_KEY);
+  }
+
+  return candidates;
+}
+
+// ========================
 // 设备状态读取
 // ========================
 function loadDeviceStatus() {
@@ -262,7 +300,6 @@ async function sendPushNotification({ title, body }) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(barkPayload)
   });
-
   const responseText = await response.text();
   let result = {};
   try {
@@ -511,8 +548,7 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "", deviceSt
   }
 
   // 默认版本：包含设备状态感知和推送偏好
-  return `
-## 最高优先级规则
+  return `## 最高优先级规则
 1. 这是一次后台自动唤醒，不是用户发起的对话。你没有收到任何新消息。
 2. 你的唯一任务是决定是否主动联系用户。不能生成对话回复。
 3. 输出格式必须严格遵守以下二选一。
@@ -600,7 +636,7 @@ async function runWakeUp() {
     .join("\n\n");
 
   const baseSystemPrompt = cleanMessages.find(msg => msg.role === "system");
-  const cleanSP = baseSystemPrompt 
+  const cleanSP = baseSystemPrompt
     ? normalizeContentToText(baseSystemPrompt.content).split("## Memories")[0].trim()
     : "";
 
@@ -612,12 +648,9 @@ async function runWakeUp() {
     {
       role: "user",
       content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
-
 这些内容不是正在发生的实时对话。
 用户并没有给你发消息。
-
 你现在处于后台自主唤醒状态。
-
 最近记录：
 
 ${historyText}`
@@ -627,39 +660,63 @@ ${historyText}`
   console.log("\n===== WAKE MESSAGES SUMMARY =====\n");
   console.log(JSON.stringify(summarizeWakeMessages(wakeMessages)));
 
-  // 获取模型配置（支持 MODEL_ROUTES）
-  const modelConfig = getWakeModelConfig();
-  if (!modelConfig) {
+  // 获取候选模型列表（支持 MODEL_ROUTES 故障转移）
+  const modelCandidates = getWakeModelCandidates();
+  if (!modelCandidates.length) {
     console.log("缺少模型配置（MODEL_ROUTES 或 TARGET_API_URL/TARGET_API_KEY/MODEL_NAME），跳过本次唤醒");
     return;
   }
 
-  console.log(`使用模型：${modelConfig.model}`);
+  let data = null;
+  let lastError = null;
 
-  const response = await fetch(modelConfig.url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${modelConfig.key}`
-    },
-    body: JSON.stringify({
-      model: modelConfig.model,
-      messages: wakeMessages,
-      temperature: 0.8,
-      top_p: 0.95,
-      stream: false
-    })
-  });
+  for (let i = 0; i < modelCandidates.length; i++) {
+    const modelConfig = modelCandidates[i];
+    console.log(`尝试模型（${i + 1}/${modelCandidates.length}）：${modelConfig.model}`);
+    try {
+      const response = await fetch(modelConfig.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${modelConfig.key}`
+        },
+        body: JSON.stringify({
+          model: modelConfig.model,
+          messages: wakeMessages,
+          temperature: 0.8,
+          top_p: 0.95,
+          stream: false
+        })
+      });
 
-  const responseText = await response.text();
-  let data;
-  try {
-    data = JSON.parse(responseText);
-  } catch {
-    throw new Error(`模型返回的不是 JSON（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        lastError = `模型 ${modelConfig.model} 请求失败（HTTP ${response.status}）：${responseText.slice(0, 200)}`;
+        console.log(`⚠️ ${lastError}`);
+        continue;
+      }
+
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        lastError = `模型 ${modelConfig.model} 返回的不是 JSON：${responseText.slice(0, 200)}`;
+        console.log(`⚠️ ${lastError}`);
+        continue;
+      }
+
+      // 成功拿到响应，跳出循环
+      console.log(`✅ 模型 ${modelConfig.model} 请求成功`);
+      break;
+    } catch (err) {
+      lastError = `模型 ${modelConfig.model} 请求异常：${err.message}`;
+      console.log(`⚠️ ${lastError}`);
+      continue;
+    }
   }
-  if (!response.ok) {
-    throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
+
+  if (!data) {
+    throw new Error(`所有模型均请求失败：${lastError || "未知错误"}`);
   }
 
   const rawAiText = normalizeContentToText(data.choices?.[0]?.message?.content).trim();
@@ -677,7 +734,7 @@ ${historyText}`
     eventContent = diarySaved
       ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
       : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
-  // 判断 AI 是否明确要静默
+    // 判断 AI 是否明确要静默
   } else if (aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/)) {
     const noActionMatch = aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/);
     // AI 选择不发送推送
