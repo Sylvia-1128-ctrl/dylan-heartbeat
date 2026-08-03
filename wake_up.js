@@ -5,6 +5,7 @@ const { buildNtfyPayload } = require("./ntfy_priority");
 
 const TIMELINE_PATH = path.join(__dirname, "enhanced_messages.json");
 const DEVICE_STATUS_FILE = path.join(__dirname, "device_status.json");
+const LAST_ACTIVE_FILE = path.join(__dirname, "last_active.json");
 const PORT = Number(process.env.PORT) || 3000;
 const GATEWAY_BASE_URL = (process.env.GATEWAY_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, "");
 const GATEWAY_URL = `${GATEWAY_BASE_URL}/internal/wake-event`;
@@ -179,6 +180,21 @@ function getWakeModelCandidates() {
   }
 
   return candidates;
+}
+
+// ========================
+// 用户最后活跃时间
+// ========================
+function loadLastActiveTime() {
+  try {
+    if (!fs.existsSync(LAST_ACTIVE_FILE)) return null;
+    const data = JSON.parse(fs.readFileSync(LAST_ACTIVE_FILE, "utf-8"));
+    if (!data || !data.time) return null;
+    const parsed = new Date(data.time);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  } catch {
+    return null;
+  }
 }
 
 // ========================
@@ -598,7 +614,11 @@ async function runWakeUp() {
   const messages = loadTimelineMessages();
   if (!messages) return;
 
-  const lastUserTime = getLastUserTime(messages);
+  // 优先读取 gateway 记录的 last_active.json（最可靠）
+  let lastUserTime = loadLastActiveTime();
+  // 回退：从消息内容解析时间戳
+  if (!lastUserTime) lastUserTime = getLastUserTime(messages);
+
   if (!lastUserTime) {
     console.log("未找到用户时间");
     return;
