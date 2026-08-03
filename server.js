@@ -577,6 +577,14 @@ app.post("/v1/chat/completions", async (req, reply) => {
     }));
 
     const kelivoMessages = body.messages || [];
+        // 记录用户最后活跃时间，供 wake_up.js 读取
+    const hasUserMsg = kelivoMessages.some(m => m.role === "user");
+    if (hasUserMsg) {
+      try {
+        fs.writeJsonSync("./last_active.json", { time: new Date().toISOString() });
+      } catch (e) { console.log("写入 last_active.json 失败:", e.message); }
+    }
+
     const oldTimeline = loadTimeline();
 
     const tsDB = loadTimestampDB();
