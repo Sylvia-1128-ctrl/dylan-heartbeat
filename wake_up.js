@@ -222,6 +222,7 @@ function buildDeviceStatusContext(status) {
   if (status.focusMode) lines.push(`- 专注模式：${status.focusMode}`);
   if (status.weather) lines.push(`- 天气：${status.weather}`);
   if (status.screenTime) lines.push(`- 屏幕使用时间：${status.screenTime}`);
+  if (status.location) lines.push(`- 位置：${status.location}`);
   if (status.reminders) lines.push(`- 提醒事项：${status.reminders}`);
   if (status.receivedAt) lines.push(`- 上报时间：${status.receivedAt}`);
   return lines.join("\n");
