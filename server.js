@@ -721,6 +721,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
           if (deviceStatus.weather) parts.push(`天气:${deviceStatus.weather}`);
           if (deviceStatus.reminders) parts.push(`提醒:${deviceStatus.reminders}`);
           if (deviceStatus.screenTime) parts.push(`屏幕使用:${deviceStatus.screenTime}`);
+          if (deviceStatus.location) parts.push(`位置:${deviceStatus.location}`);
           parts.push(`上报时间:${deviceStatus.receivedAt}`);
           const statusMsg = { role: "system", content: `[用户设备状态] ${parts.join(", ")}` };
           const firstNonSystem = llmMessages.findIndex(m => m.role !== "system");
