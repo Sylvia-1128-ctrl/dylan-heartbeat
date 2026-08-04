@@ -1811,6 +1811,9 @@ app.get("/test-bark", async (req, reply) => {
 // ========================
 // 启动服务
 // ========================
+// MCP 查岗
+try { require("./mcp_handler").register(app); } catch(e) { console.error("MCP:", e.message); }
+
 app.listen({ port: PORT, host: "0.0.0.0" }, (err, address) => {
   if (err) {
     console.error(err);
