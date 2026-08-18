@@ -84,13 +84,11 @@ let lastStatusContent = "";
 
 function startWatching() {
   if (!fs.existsSync(DEVICE_STATUS_FILE)) {
-    // 文件还不存在，等创建后再监听
     setTimeout(startWatching, 5000);
     return;
   }
 
   try {
-    // 用 watchFile 替代 watch，更可靠（尤其在容器环境）
     fs.watchFile(DEVICE_STATUS_FILE, { interval: 2000 }, () => {
       try {
         const content = fs.readFileSync(DEVICE_STATUS_FILE, "utf-8");
@@ -165,7 +163,6 @@ function checkActivity(args = {}) {
   const recent = log.slice(-limit).reverse();
   const sessions = calculateAppSessions(log);
 
-  // 同时读取当前状态
   let currentStatus = null;
   try {
     if (fs.existsSync(DEVICE_STATUS_FILE)) {
@@ -263,10 +260,31 @@ function getDeviceStatus() {
   }
 }
 
-const FUNCS = {
+// ========================
+// 加载偷看模块（如果存在）
+// ========================
+
+let PEEK_TOOLS = [];
+let PEEK_FUNCS = {};
+let peekRegisterRoutes = null;
+
+try {
+  const peek = require("./peek_handler");
+  PEEK_TOOLS = peek.PEEK_TOOLS || [];
+  PEEK_FUNCS = peek.PEEK_FUNCS || {};
+  peekRegisterRoutes = peek.registerRoutes || null;
+  console.log("📸 偷看模块已加载");
+} catch (e) {
+  console.log("偷看模块未加载:", e.message);
+}
+
+// 合并所有工具
+const ALL_TOOLS = [...TOOLS, ...PEEK_TOOLS];
+const ALL_FUNCS = {
   check_activity: checkActivity,
   send_bark: sendBark,
-  get_device_status: getDeviceStatus
+  get_device_status: getDeviceStatus,
+  ...PEEK_FUNCS
 };
 
 // ========================
@@ -299,7 +317,7 @@ function register(app) {
       return reply.send({
         jsonrpc: "2.0",
         id: rid,
-        result: { tools: TOOLS }
+        result: { tools: ALL_TOOLS }
       });
     }
 
@@ -308,7 +326,7 @@ function register(app) {
       const name = params.name;
       const args = params.arguments || {};
 
-      if (!FUNCS[name]) {
+      if (!ALL_FUNCS[name]) {
         return reply.send({
           jsonrpc: "2.0",
           id: rid,
@@ -317,7 +335,7 @@ function register(app) {
       }
 
       try {
-        let result = FUNCS[name](args);
+        let result = ALL_FUNCS[name](args);
         if (result && typeof result.then === "function") {
           result = await result;
         }
@@ -342,6 +360,15 @@ function register(app) {
       error: { code: -32601, message: `未知方法: ${method}` }
     });
   });
+
+  // 注册偷看模块的 HTTP 路由
+  if (peekRegisterRoutes) {
+    try {
+      peekRegisterRoutes(app);
+    } catch (e) {
+      console.log("偷看模块路由注册失败:", e.message);
+    }
+  }
 
   // 启动活动监听
   startWatching();
