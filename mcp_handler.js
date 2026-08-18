@@ -263,10 +263,29 @@ function getDeviceStatus() {
   }
 }
 
+// ========================
+// 偷看模块工具集成
+// ========================
+
+let PEEK_TOOLS = [];
+let PEEK_FUNCS = {};
+
+try {
+  const peek = require("./peek_handler");
+  PEEK_TOOLS = peek.PEEK_TOOLS || [];
+  PEEK_FUNCS = peek.PEEK_FUNCS || {};
+} catch (e) {
+  console.log("偷看模块未加载:", e.message);
+}
+
+// 合并所有工具
+const ALL_TOOLS = [...TOOLS, ...PEEK_TOOLS];
+
 const FUNCS = {
   check_activity: checkActivity,
   send_bark: sendBark,
-  get_device_status: getDeviceStatus
+  get_device_status: getDeviceStatus,
+  ...PEEK_FUNCS
 };
 
 // ========================
@@ -299,7 +318,7 @@ function register(app) {
       return reply.send({
         jsonrpc: "2.0",
         id: rid,
-        result: { tools: TOOLS }
+        result: { tools: ALL_TOOLS }
       });
     }
 
