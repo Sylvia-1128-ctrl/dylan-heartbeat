@@ -144,24 +144,47 @@ const PEEK_FUNCS = {
 };
 
 // ========================
+// 鉴权辅助
+// ========================
+
+function verifyPeekAuth(req) {
+  // 支持多种方式验证：
+  // 1. x-peek-secret 头部 = PEEK_SECRET
+  // 2. body.secret = PEEK_SECRET
+  // 3. x-api-key 头部 = GATEWAY_API_KEY（和状态上报用同一个key）
+  const peekSecret = process.env.PEEK_SECRET;
+  const gatewayKey = process.env.GATEWAY_API_KEY;
+  const body = req.body || {};
+
+  const fromHeader = req.headers["x-peek-secret"] || "";
+  const fromBody = body.secret || "";
+  const fromApiKey = req.headers["x-api-key"] || "";
+
+  // 如果提供了 gateway key 且匹配，直接通过
+  if (gatewayKey && fromApiKey === gatewayKey) return true;
+
+  // 如果提供了 peek secret 且匹配
+  if (peekSecret && (fromHeader === peekSecret || fromBody === peekSecret)) return true;
+
+  // 如果 PEEK_SECRET 没配置，只要 gateway key 匹配就行
+  if (!peekSecret && gatewayKey && fromApiKey === gatewayKey) return true;
+
+  return false;
+}
+
+// ========================
 // 注册 HTTP 路由（由 mcp_handler 调用）
 // ========================
 
 function registerRoutes(app) {
   // 截图上传接口（快捷指令用 base64 JSON 方式上传）
   app.post("/v1/peek/upload", async (req, reply) => {
-    const secret = process.env.PEEK_SECRET || "peek123";
-    // 支持从 header、query 参数或 body 中读取密钥
-    const body = req.body || {};
-    const provided = req.headers["x-peek-secret"]
-      || (req.query && req.query.secret)
-      || body.secret;
-
-    if (provided !== secret) {
+    if (!verifyPeekAuth(req)) {
       return reply.code(401).send({ error: "Unauthorized" });
     }
 
     try {
+      const body = req.body || {};
       const { image, filename: rawFilename } = body;
       if (!image) {
         return reply.code(400).send({ error: "Missing 'image' field (base64 encoded)" });
@@ -192,10 +215,11 @@ function registerRoutes(app) {
 
   // 截图查看接口
   app.get("/v1/peek/image/:filename", async (req, reply) => {
-    const secret = process.env.PEEK_SECRET || "peek123";
-    const provided = req.headers["x-peek-secret"] || (req.query && req.query.secret) || req.headers["x-api-key"];
-    const gatewayKey = process.env.GATEWAY_API_KEY;
-    if (provided !== secret && provided !== gatewayKey) {
+    const secret = process.env.PEEK_SECRET || "";
+    const gatewayKey = process.env.GATEWAY_API_KEY || "";
+    const provided = req.headers["x-peek-secret"] || req.headers["x-api-key"] || (req.query && req.query.secret) || "";
+
+    if (!((secret && provided === secret) || (gatewayKey && provided === gatewayKey))) {
       return reply.code(401).send({ error: "Unauthorized" });
     }
 
@@ -216,10 +240,11 @@ function registerRoutes(app) {
 
   // 最新截图快捷接口
   app.get("/v1/peek/latest", async (req, reply) => {
-    const secret = process.env.PEEK_SECRET || "peek123";
-    const provided = req.headers["x-peek-secret"] || (req.query && req.query.secret) || req.headers["x-api-key"];
-    const gatewayKey = process.env.GATEWAY_API_KEY;
-    if (provided !== secret && provided !== gatewayKey) {
+    const secret = process.env.PEEK_SECRET || "";
+    const gatewayKey = process.env.GATEWAY_API_KEY || "";
+    const provided = req.headers["x-peek-secret"] || req.headers["x-api-key"] || (req.query && req.query.secret) || "";
+
+    if (!((secret && provided === secret) || (gatewayKey && provided === gatewayKey))) {
       return reply.code(401).send({ error: "Unauthorized" });
     }
 
