@@ -8,7 +8,7 @@
  *   4. MCP 调用 get_screenshot 查看最近截图
  * 
  * 环境变量（Railway 里配置）：
- *   SMTP_HOST       - SMTP 服务器（如 smtp.gmail.com）
+ *   SMTP_HOST       - SMTP 服务器（如 smtp.qq.com）
  *   SMTP_PORT       - 端口（默认 465）
  *   SMTP_USER       - 发件邮箱
  *   SMTP_PASS       - 应用专用密码
@@ -151,13 +151,18 @@ function registerRoutes(app) {
   // 截图上传接口（快捷指令用 base64 JSON 方式上传）
   app.post("/v1/peek/upload", async (req, reply) => {
     const secret = process.env.PEEK_SECRET || "peek123";
-    const provided = req.headers["x-peek-secret"] || (req.query && req.query.secret);
+    // 支持从 header、query 参数或 body 中读取密钥
+    const body = req.body || {};
+    const provided = req.headers["x-peek-secret"]
+      || (req.query && req.query.secret)
+      || body.secret;
+
     if (provided !== secret) {
       return reply.code(401).send({ error: "Unauthorized" });
     }
 
     try {
-      const { image, filename: rawFilename } = req.body || {};
+      const { image, filename: rawFilename } = body;
       if (!image) {
         return reply.code(400).send({ error: "Missing 'image' field (base64 encoded)" });
       }
